@@ -12,6 +12,16 @@
 #define WIDTH 1920
 #define HEIGHT 24
 
+const char *CSS_STYLE = 
+    "#my-panel-window {"
+    "   background-color: rgba(200, 200, 200, 0.75);"
+    "   border-radius: 4px;"
+    "   border-top-left: 1px solid rgba(0, 0, 0, 0.75);"
+    "	border-top-righ: 1px solid rgba(0, 0, 0, 0.75);"
+    "	color: black;"
+    "}"
+    "#my-panel-window :hover { opacity: 0.1; }";
+
 // Globálne ukazovatele, aby sme k nim mali prístup pri zmene aplikácie
 GtkWidget *menu_container = NULL;
 GtkWidget *current_menu = NULL;
@@ -157,14 +167,39 @@ static void setup_dbus_menu(void) {
     get_current_menu_on_start(connection);
 }
 
+void enable_alpha_channel(GtkWidget *window) {
+    GdkScreen *gdk_screen = gtk_widget_get_screen(window);
+    GdkVisual *visual = gdk_screen_get_rgba_visual(gdk_screen);
+    if (visual != NULL && gdk_screen_is_composited(gdk_screen)) {
+        gtk_widget_set_visual(window, visual);
+    }
+}
+
+void apply_css_style(void) {
+    GtkCssProvider *provider = gtk_css_provider_new();
+    gtk_css_provider_load_from_data(provider, CSS_STYLE, -1, NULL);
+    gtk_style_context_add_provider_for_screen(
+        gdk_screen_get_default(),
+        GTK_STYLE_PROVIDER(provider),
+        GTK_STYLE_PROVIDER_PRIORITY_APPLICATION
+    );
+    g_object_unref(provider);
+}
+
 int main(int argc, char *argv[]) {
     // Inicializácia GTK
     gtk_init(&argc, &argv);
  
     // 1. Vytvorenie hlavného okna panelu
     GtkWidget *window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
-    gtk_window_set_title(GTK_WINDOW(window), "Jednoduchy Retro Panel");
+    enable_alpha_channel(window);
+    gtk_widget_set_name(window, "my-panel-window");
+    gtk_window_set_title(GTK_WINDOW(window), "AppMenu Panel");
     
+    gtk_window_move(GTK_WINDOW(window), 0, 0);
+
+    apply_css_style();
+
     // Nastavenie rozmerov
     gtk_window_set_default_size(GTK_WINDOW(window), WIDTH, HEIGHT);
     
