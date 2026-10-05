@@ -1,0 +1,21 @@
+// MIT License
+// Lukas Veselovsky, lukve
+// Created with magician help of the AI.
+
+#include "gtk/gtk.h"
+#include <gdk/gdkx.h>
+#include <gio/gio.h> 
+#include <string.h>
+#include <stdio.h>
+#include <X11/Xlib.h>
+
+static GtkWidget *menu_container = NULL;
+static GtkWidget *current_menu = NULL;
+static GtkWidget *placeholder_label = NULL; 
+static GDBusConnection *dbus_connection = NULL;
+
+void update_menu_for_window(guint32 window_id);
+void update_global_menu(const char *bus_name, const char *object_path, guint32 window_id);
+
+static int safe_x_error_handler(Display *d, XErrorEvent *e) { return 0; }
+
