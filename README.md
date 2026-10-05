@@ -1,4 +1,4 @@
-#Yes, another GTK+ based Panel with Global Menu at left and Clock at right side.
+Yes, another GTK+ based Panel with Global Menu at left, Battery Info and Clock at right side.
 
 
 Ultra-ľahký a bleskový panel v C/GTK3, ktorý:
