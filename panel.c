@@ -6,15 +6,25 @@
 
 #include "gtk/gtk.h"
 #include <time.h>
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include "ini.h"
 
 #define WIDTH 1920
 #define HEIGHT 24
 
 void init_menu_system(GtkWidget *container, GtkWidget *placeholder);
 void setup_dbus_menu(void);
+
+typedef struct
+{
+    int version;
+    const char* backgroundcolor;
+    const char* color;
+} configuration;
 
 // Bezpečná štruktúra, ktorá nahrádza polia s rizikovými indexmi
 typedef struct {
@@ -23,10 +33,11 @@ typedef struct {
     GtkWidget *volume;
 } PanelLabels;
 
-const char *CSS_STYLE = 
+// Definícia šablóny (formátovacieho reťazca)
+const char *CSS_TEMPLATE = 
     "#my-panel-window {"
-    "   background-color: #dfdfdf;"
-    "   color: black;"
+    "   background-color: %s;"
+    "   color: %s;"
     "   border-color: black;"
     "   border-top-left-radius: 3px;"
     "   border-top-right-radius: 3px;"
@@ -34,8 +45,8 @@ const char *CSS_STYLE =
     "   transition: filter 0.2s ease;"
     "}"
     "#my-panel-window menu, #my-panel-window menubar, #my-panel-window menuitem {"
-    "   background-color: #dfdfdf;"
-    "   color: black;"
+    "   background-color: %s;"
+    "   color: %s;"
     "}"
     "#my-panel-window menuitem:hover {"
     "   background-color: grey;"
@@ -43,6 +54,26 @@ const char *CSS_STYLE =
     "#my-panel-window label {"
     "   padding: 0 2px;"
     "}";
+
+static int handler(void* user, const char* section, const char* name,
+                   const char* value)
+{
+    configuration* pconfig = (configuration*)user;
+
+    #define MATCH(s, n) strcmp(section, s) == 0 && strcmp(name, n) == 0
+	if (MATCH("global", "version")) {
+        pconfig->version = atoi(value);
+    } else 
+	if (MATCH("theme", "backgroundcolor")) {
+        pconfig->backgroundcolor = strdup(value);
+    } else 
+	if (MATCH("theme", "color")) {
+        pconfig->color = strdup(value);
+    } else {
+        return 0;  /* unknown section/name, error */
+    }
+    return 1;
+}
 
 static void get_battery_status(char *buffer, size_t max_len) {
     FILE *f_cap = fopen("/sys/class/power_supply/BAT0/capacity", "r");
@@ -146,6 +177,8 @@ void enable_alpha_channel(GtkWidget *window) {
     }
 }
 
+char *CSS_STYLE = NULL;
+
 void apply_css_style(void) {
     GtkCssProvider *provider = gtk_css_provider_new();
     gtk_css_provider_load_from_data(provider, CSS_STYLE, -1, NULL);
@@ -167,7 +200,33 @@ int main(int argc, char *argv[]) {
     g_setenv("QT_QPA_PLATFORMTHEME", "appmenu-qt5", TRUE);
 
     g_log_set_handler("LIBDBUSMENU-GLIB", G_LOG_LEVEL_WARNING | G_LOG_LEVEL_CRITICAL, suppress_dbusmenu_warnings, NULL);
-	
+
+    configuration config;
+    config.version = 0;  /* set defaults */
+    config.backgroundcolor = NULL;
+    config.color = NULL;
+
+    if (ini_parse("test.ini", handler, &config) < 0) {
+        printf("Can't load 'test.ini'\n");
+        return 1;
+    }
+    printf("Config loaded from 'test.ini': version=%d, backgroundcolor=%s, color=%s\n",
+        config.version, config.backgroundcolor, config.color);
+
+    // Smerník, do ktorého sa uloží vygenerované CSS
+    // asprintf automaticky alokuje pamäť pre výsledný reťazec
+    if (asprintf(&CSS_STYLE, CSS_TEMPLATE, 
+             config.backgroundcolor, config.color, 
+             config.backgroundcolor, config.color) == -1) {
+	// Spracovanie chyby alokácie, ak je to potrebné
+	CSS_STYLE = NULL; 
+    }
+
+    if (config.backgroundcolor)
+        free((void*)config.backgroundcolor);
+    if (config.color)
+        free((void*)config.color);
+
 	// Let's go !!!
 
     gtk_init(&argc, &argv);
