@@ -1,281 +1,366 @@
 // MIT License
 // Lukas Veselovsky, lukve
 //
-// Created with magician help of the AI.
+// Hlavný súbor panela upravený pre zobrazovanie Title aplikácie.
+// Hlavný súbor panela s pridaným indikátorom pre Wi-Fi.
+//
+// Kompletný panel: Sledovanie aplikácie, WiFi, Batéria, Hlasitosť a Hodiny.
+//
+// MIT License
+// Lukas Veselovsky, lukve
+//
+// Hlavný súbor panela upravený pre zobrazovanie Title aplikácie.
+// Hlavný súbor panela s pridaným indikátorom pre Wi-Fi a otváraním mixéra.
+//
+// Kompletný panel: Sledovanie aplikácie, WiFi, Batéria, Hlasitosť a Hodiny.
 //
 
-#include "gtk/gtk.h"
+#include <gtk/gtk.h>
+#include <gdk/gdkx.h>
 #include <time.h>
-#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <alsa/asoundlib.h>
 
-#include "ini.h"
+#include <sys/socket.h>
+#include <sys/ioctl.h>
+#include <net/if.h>
+#include <unistd.h>
+#include <arpa/inet.h>
 
-#define WIDTH 1920
-#define HEIGHT 24
-
+// Deklarácia funkcií z menu.c
 void init_menu_system(GtkWidget *container, GtkWidget *placeholder);
 void setup_dbus_menu(void);
+void refresh_application_title(void);
 
-typedef struct
-{
-    int version;
-    const char* backgroundcolor;
-    const char* color;
+// Štruktúra na uloženie načítanej konfigurácie
+typedef struct {
+    char bg_color[16];
+    char text_color[16];
 } configuration;
 
-// Bezpečná štruktúra, ktorá nahrádza polia s rizikovými indexmi
-typedef struct {
-    GtkWidget *clock;
-    GtkWidget *battery;
-    GtkWidget *volume;
-} PanelLabels;
-
-// Definícia šablóny (formátovacieho reťazca)
-const char *CSS_TEMPLATE = 
-    "#my-panel-window {"
-    "   background-color: %s;"
-    "   color: %s;"
-    "   border-color: black;"
-    "   border-top-left-radius: 3px;"
-    "   border-top-right-radius: 3px;"
-    "   border-bottom: 1px solid rgba(0, 0, 0, 0.15);"
-    "   transition: filter 0.2s ease;"
-    "}"
-    "#my-panel-window menu, #my-panel-window menubar, #my-panel-window menuitem {"
-    "   background-color: %s;"
-    "   color: %s;"
-    "}"
-    "#my-panel-window menuitem:hover {"
-    "   background-color: grey;"
-    "}"
-    "#my-panel-window label {"
-    "   padding: 0 2px;"
-    "}";
-
-static int handler(void* user, const char* section, const char* name,
-                   const char* value)
-{
-    configuration* pconfig = (configuration*)user;
-
-    #define MATCH(s, n) strcmp(section, s) == 0 && strcmp(name, n) == 0
-	if (MATCH("global", "version")) {
-        pconfig->version = atoi(value);
-    } else 
-	if (MATCH("theme", "backgroundcolor")) {
-        pconfig->backgroundcolor = strdup(value);
-    } else 
-	if (MATCH("theme", "color")) {
-        pconfig->color = strdup(value);
-    } else {
-        return 0;  /* unknown section/name, error */
+// Handler pre INI parser (číta sekciu [theme])
+static int ini_handler_callback(void* user, const char* section, const char* name, const char* value) {
+    configuration* config = (configuration*)user;
+    if (strcmp(section, "theme") == 0) {
+        if (strcmp(name, "backgroundcolor") == 0) {
+            strncpy(config->bg_color, value, sizeof(config->bg_color) - 1);
+        } else if (strcmp(name, "color") == 0) {
+            strncpy(config->text_color, value, sizeof(config->text_color) - 1);
+        }
     }
     return 1;
 }
 
-static void get_battery_status(char *buffer, size_t max_len) {
+// 1. INDIKÁTOR SIETE
+static int check_network_status(void) {
+    FILE *fp = fopen("/proc/net/dev", "r");
+    if (!fp) return 0;
+    
+    char line[256];
+    int net_type = 0; 
+    int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    
+    if (fgets(line, sizeof(line), fp)) {}
+    if (fgets(line, sizeof(line), fp)) {}
+    
+    while (fgets(line, sizeof(line), fp)) {
+        char iface[32];
+        if (sscanf(line, " %31[^:]", iface) == 1) {
+            if (strcmp(iface, "lo") == 0) continue;
+            
+            struct ifreq ifr;
+            memset(&ifr, 0, sizeof(ifr));
+            strncpy(ifr.ifr_name, iface, IFNAMSIZ - 1);
+            
+            if (sock >= 0) {
+                if (ioctl(sock, SIOCGIFADDR, &ifr) == 0) {
+                    struct ifreq check_ifr;
+                    memset(&check_ifr, 0, sizeof(check_ifr));
+                    strncpy(check_ifr.ifr_name, iface, IFNAMSIZ - 1);
+                    
+                    if (ioctl(sock, SIOCGIFFLAGS, &check_ifr) == 0) {
+                        short current_flags = check_ifr.ifr_ifru.ifru_flags;
+                        if ((current_flags & IFF_UP) && (current_flags & IFF_RUNNING)) {
+                            if (strncmp(iface, "wl", 2) == 0) {
+                                net_type = 1;
+                                break;
+                            }
+                            else if (strncmp(iface, "eth", 3) == 0 || strncmp(iface, "enp", 3) == 0 || strncmp(iface, "eno", 3) == 0) {
+                                net_type = 2;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if (sock >= 0) close(sock);
+    fclose(fp);
+    return net_type;
+}
+
+static gboolean update_network_ticker(gpointer label) {
+    int status = check_network_status();
+    if (status == 1) gtk_label_set_text(GTK_LABEL(label), "📶 WiFi");
+    else if (status == 2) gtk_label_set_text(GTK_LABEL(label), "🌐 LAN");
+    else gtk_label_set_text(GTK_LABEL(label), "❌ No WiFi");
+    return TRUE;
+}
+
+// Callback pre kliknutie na indikátor hlasitosti
+static gboolean on_volume_click(GtkWidget *widget, GdkEventButton *event, gpointer user_data) {
+    if (event->type == GDK_BUTTON_PRESS && event->button == 1) { // Ľavé kliknutie
+        GError *error = NULL;
+        // Spustí pavucontrol na pozadí asynchrónne
+        if (!g_spawn_command_line_async("pavucontrol", &error)) {
+            g_warning("Nepodarilo sa spustiť mixér zvuku: %s", error->message);
+            g_error_free(error);
+        }
+        return TRUE;
+    }
+    return FALSE;
+}
+
+// 2. INDIKÁTOR: Hlasitosť
+static void get_volume_info(int *out_volume, int *out_muted) {
+    long volume = 0, min = 0, max = 0;
+    int muted = 0;
+    snd_mixer_t *handle;
+    snd_mixer_elem_t *elem;
+    snd_mixer_selem_id_t *sid;
+    const char *card = "default";
+    const char *selem_name = "Master";
+
+    snd_mixer_open(&handle, 0);
+    snd_mixer_attach(handle, card);
+    snd_mixer_selem_register(handle, NULL, NULL);
+    snd_mixer_load(handle);
+    snd_mixer_selem_id_alloca(&sid);
+    snd_mixer_selem_id_set_index(sid, 0);
+    snd_mixer_selem_id_set_name(sid, selem_name);
+    elem = snd_mixer_find_selem(handle, sid);
+
+    if (elem) {
+        snd_mixer_selem_get_playback_volume_range(elem, &min, &max);
+        snd_mixer_selem_get_playback_volume(elem, SND_MIXER_SCHN_FRONT_LEFT, &volume);
+        snd_mixer_selem_get_playback_switch(elem, SND_MIXER_SCHN_FRONT_LEFT, &muted);
+        if (max - min > 0) *out_volume = (int)((volume * 100) / (max - min));
+        else *out_volume = 0;
+        *out_muted = !muted;
+    } else {
+        *out_volume = 0; *out_muted = 1;
+    }
+    snd_mixer_close(handle);
+}
+
+static gboolean update_volume_ticker(gpointer label) {
+    int volume = 0, muted = 0;
+    char buf[32];
+    get_volume_info(&volume, &muted);
+    if (muted) snprintf(buf, sizeof(buf), "🔇 Muted");
+    else snprintf(buf, sizeof(buf), "🔊 %d%%", volume);
+    gtk_label_set_text(GTK_LABEL(label), buf);
+    return TRUE;
+}
+
+// 3. INDIKÁTOR: Batéria / Napájanie
+static gboolean update_battery_ticker(gpointer label) {
     FILE *f_cap = fopen("/sys/class/power_supply/BAT0/capacity", "r");
     FILE *f_stat = fopen("/sys/class/power_supply/BAT0/status", "r");
-    
-    if (!f_cap) {
-        f_cap = fopen("/sys/class/power_supply/BAT1/capacity", "r");
-        f_stat = fopen("/sys/class/power_supply/BAT1/status", "r");
-    }
+    if (!f_cap) f_cap = fopen("/sys/class/power_supply/BAT1/capacity", "r");
+    if (!f_stat) f_stat = fopen("/sys/class/power_supply/BAT1/status", "r");
 
-    if (f_cap && f_stat) {
-        int capacity = 0;
-        char status[32] = {0};
-        
-        if (fscanf(f_cap, "%d", &capacity) == 1 && fscanf(f_stat, "%31s", status) == 1) {
-            // const char *icon = "🔋";
-			// "\xf0\x9f\x94\xb4" je natívny UTF-8 kód pre symbol 🔋
-			const char *icon = "\xf0\x9f\x94\xb4";
-            if (g_str_has_prefix(status, "Charg")) {
-                // icon = "⚡";
-				// "\xe2\x9a\xa1" je natívny UTF-8 kód pre symbol ⚡
-				icon = "\xe2\x9a\xa1";
-            }
-            snprintf(buffer, max_len, "%s %d%%", icon, capacity);
-        } else {
-            snprintf(buffer, max_len, "BAT N/A");
-        }
+    int capacity = 0;
+    char status[32] = "Unknown";
+    char buf[32];
+
+    if (f_cap) {
+        if (fscanf(f_cap, "%d", &capacity) != 1) capacity = 0;
         fclose(f_cap);
+    }
+    if (f_stat) {
+        if (fscanf(f_stat, "%31s", status) != 1) strcpy(status, "Unknown");
         fclose(f_stat);
-    } else {
-        if (f_cap) fclose(f_cap);
-        if (f_stat) fclose(f_stat);
-        snprintf(buffer, max_len, "");
-    }
-}
-
-static void get_volume_status(char *buffer, size_t max_len) {
-    FILE *f = popen("amixer get Master | grep -o -E '[0-9]+%' | head -n 1", "r");
-    FILE *f_mute = popen("amixer get Master | grep -o -E '\\[on\\]|\\[off\\]' | head -n 1", "r");
-    
-    char volume[32] = {0};
-    char mute_status[32] = {0};
-
-    if (f && fgets(volume, sizeof(volume), f)) {
-        volume[strcspn(volume, "\n")] = 0;
-        
-        gboolean is_muted = FALSE;
-        if (f_mute && fgets(mute_status, sizeof(mute_status), f_mute)) {
-            if (strstr(mute_status, "off")) {
-                is_muted = TRUE;
-            }
-        }
-
-        if (is_muted) {
-            // snprintf(buffer, max_len, "🔇 Mute");
-			// "\xf0\x9f\x94\xa0" je natívny UTF-8 kód pre symbol 🔇
-			snprintf(buffer, max_len, "\xf0\x9f\x94\xa0 Mute");
-
-        } else {
-            // snprintf(buffer, max_len, "🔊 %s", volume);
-			// "\xf0\x9f\x94\xa1" je natívny UTF-8 kód pre symbol 🔊
-			snprintf(buffer, max_len, "\xf0\x9f\x94\xa1 %s", volume);
-
-        }
-    } else {
-        snprintf(buffer, max_len, "🔊 N/A");
     }
 
-    if (f) pclose(f);
-    if (f_mute) pclose(f_mute);
+    const char *icon = "🔋";
+    if (strcmp(status, "Charging") == 0) icon = "⚡🔋";
+    if (f_cap) snprintf(buf, sizeof(buf), "%s %d%%", icon, capacity);
+    else snprintf(buf, sizeof(buf), "🔌 AC");
+
+    gtk_label_set_text(GTK_LABEL(label), buf);
+    return TRUE;
 }
 
-static gboolean update_clock(gpointer user_data) {
-    PanelLabels *labels = (PanelLabels *)user_data;
-
+// 4. INDIKÁTOR: Hodiny
+static gboolean update_clock_ticker(gpointer label) {
     time_t rawtime;
     struct tm *timeinfo;
-    char time_buffer[40]; 
-
+    char buffer[32];
     time(&rawtime);
     timeinfo = localtime(&rawtime);
-    strftime(time_buffer, sizeof(time_buffer), "%a %H:%M:%S", timeinfo);
-    gtk_label_set_text(GTK_LABEL(labels->clock), time_buffer);
-
-    char bat_buffer[32];
-    get_battery_status(bat_buffer, sizeof(bat_buffer));
-    gtk_label_set_text(GTK_LABEL(labels->battery), bat_buffer);
-
-    char vol_buffer[32];
-    get_volume_status(vol_buffer, sizeof(vol_buffer));
-    gtk_label_set_text(GTK_LABEL(labels->volume), vol_buffer);
-
-    return TRUE; 
-}
-
-void enable_alpha_channel(GtkWidget *window) {
-    GdkScreen *gdk_screen = gtk_widget_get_screen(window);
-    GdkVisual *visual = gdk_screen_get_rgba_visual(gdk_screen);
-    if (visual != NULL && gdk_screen_is_composited(gdk_screen)) {
-        gtk_widget_set_visual(window, visual);
-    }
-}
-
-char *CSS_STYLE = NULL;
-
-void apply_css_style(void) {
-    GtkCssProvider *provider = gtk_css_provider_new();
-    gtk_css_provider_load_from_data(provider, CSS_STYLE, -1, NULL);
-    gtk_style_context_add_provider_for_screen(
-        gdk_screen_get_default(),
-        GTK_STYLE_PROVIDER(provider),
-        GTK_STYLE_PROVIDER_PRIORITY_APPLICATION
-    );
-    g_object_unref(provider);
-}
-
-static void suppress_dbusmenu_warnings(const gchar *log_domain, GLogLevelFlags log_level, const gchar *message, gpointer user_data) {
-    // Pohlcuje varovania z libdbusmenu
+    strftime(buffer, sizeof(buffer), "%H:%M:%S", timeinfo);
+    gtk_label_set_text(GTK_LABEL(label), buffer);
+    return TRUE;
 }
 
 int main(int argc, char *argv[]) {
-    // Vynútenie schovania menu v samotných aplikáciách
-    g_setenv("UBUNTU_MENUPROXY", "1", TRUE);
-    g_setenv("QT_QPA_PLATFORMTHEME", "appmenu-qt5", TRUE);
-
-    g_log_set_handler("LIBDBUSMENU-GLIB", G_LOG_LEVEL_WARNING | G_LOG_LEVEL_CRITICAL, suppress_dbusmenu_warnings, NULL);
-
-    configuration config;
-    config.version = 0;  /* set defaults */
-    config.backgroundcolor = NULL;
-    config.color = NULL;
-
-    if (ini_parse("test.ini", handler, &config) < 0) {
-        printf("Can't load 'test.ini'\n");
-        return 1;
-    }
-    printf("Config loaded from 'test.ini': version=%d, backgroundcolor=%s, color=%s\n",
-        config.version, config.backgroundcolor, config.color);
-
-    // Smerník, do ktorého sa uloží vygenerované CSS
-    // asprintf automaticky alokuje pamäť pre výsledný reťazec
-    if (asprintf(&CSS_STYLE, CSS_TEMPLATE, 
-             config.backgroundcolor, config.color, 
-             config.backgroundcolor, config.color) == -1) {
-	// Spracovanie chyby alokácie, ak je to potrebné
-	CSS_STYLE = NULL; 
-    }
-
-    if (config.backgroundcolor)
-        free((void*)config.backgroundcolor);
-    if (config.color)
-        free((void*)config.color);
-
-	// Let's go !!!
-
     gtk_init(&argc, &argv);
- 
-    GtkWidget *window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
-    enable_alpha_channel(window);
-    gtk_widget_set_name(window, "my-panel-window");
-    gtk_window_set_title(GTK_WINDOW(window), "AppMenu Panel");
-    
-    gtk_window_move(GTK_WINDOW(window), 0, 0);
-    apply_css_style();
 
-    gtk_window_set_default_size(GTK_WINDOW(window), WIDTH, HEIGHT);
+    // Predvolené farby, ak by panel.ini chýbal
+    configuration config;
+    strcpy(config.bg_color, "#1e1e1e");
+    strcpy(config.text_color, "#ffffff");
+
+    // Načítanie panel.ini pomocou inih parsera
+    if (ini_parse("panel.ini", ini_handler_callback, &config) < 0) {
+        g_warning("Nepodarilo sa načítať 'panel.ini', používam predvolené farby.");
+    }
+
+    // Dynamické vygenerovanie CSS reťazca s načítanými farbami a štýlom pre menu
+    char dynamic_css[2048]; // Zväčšil som buffer na 2048, aby sa tam CSS bezpečne zmestilo
+    snprintf(dynamic_css, sizeof(dynamic_css),
+        ".panel-window {"
+        "   background-color: %s;"
+        "   border-bottom: 1px solid rgba(255, 255, 255, 0.1);"
+        "}"
+        ".app-title {"
+        "   color: %s;"
+        "   font-size: 13px;"
+        "   font-weight: bold;"
+        "   padding: 0 8px;"
+        "}"
+        ".indicator-item {"
+        "   color: %s;"
+        "   font-size: 12px;"
+        "   font-weight: 500;"
+        "   padding: 2px 8px;"
+        "   background-color: rgba(255, 255, 255, 0.07);"
+        "   border-radius: 4px;"
+        "}"
+        ".clock-item {"
+        "   color: %s;"
+        "   font-weight: bold;"
+        "   background-color: rgba(255, 255, 255, 0.15);"
+        "}"
+        /* === NOVÉ ŠTÝLY PRE VYSKAKOVACIE MENU === */
+        "menu {"
+        "   background-color: %s;"                  // Tmavé pozadie z INI súboru
+        "   border: 1px solid rgba(255, 255, 255, 0.15);" // Jemný okraj okolo menu
+        "   border-radius: 6px;"                    // Zaoblené rohy menu
+        "   padding: 4px 0;"
+        "}"
+        "menu menuitem {"
+        "   color: %s;"                             // Farba textu z INI súboru
+        "   font-size: 12px;"
+        "   padding: 6px 16px;"                     // Priestor okolo textu položky
+        "}"
+        "menu menuitem:hover {"
+        "   background-color: rgba(255, 255, 255, 0.1);" // Efekt zvýraznenia po prejdení myšou
+        "   color: #ffffff;"                        // Biela farba textu pri hoveri
+        "}",
+        config.bg_color, config.text_color, config.text_color, config.text_color,
+        config.bg_color, config.text_color // Pridané premenné pre nové menu štýly
+    );
+
+
+    // Aplikovanie vygenerovaného CSS
+    GtkCssProvider *css_provider = gtk_css_provider_new();
+    gtk_css_provider_load_from_data(css_provider, dynamic_css, -1, NULL);
+    gtk_style_context_add_provider_for_screen(
+        gdk_screen_get_default(),
+        GTK_STYLE_PROVIDER(css_provider),
+        GTK_STYLE_PROVIDER_PRIORITY_APPLICATION
+    );
+    g_object_unref(css_provider);
+
+    // Hlavné okno panela
+    GtkWidget *window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+    gtk_window_set_title(GTK_WINDOW(window), "My Minimal Panel");
+    gtk_window_set_default_size(GTK_WINDOW(window), 1920, 30);
+    gtk_window_set_decorated(GTK_WINDOW(window), FALSE);
+    gtk_style_context_add_class(gtk_widget_get_style_context(window), "panel-window");
+
+    // === KOMPATIBILITA PRE OPENBOX (DOCK TYPE) ===
     gtk_window_set_type_hint(GTK_WINDOW(window), GDK_WINDOW_TYPE_HINT_DOCK);
 
-    GtkWidget *main_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-    gtk_container_add(GTK_CONTAINER(window), main_box);
+    GtkWidget *panel_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    gtk_container_add(GTK_CONTAINER(window), panel_box);
 
-    GtkWidget *menu_container = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-    gtk_box_pack_start(GTK_BOX(main_box), menu_container, FALSE, FALSE, 12); 
-
-    GtkWidget *placeholder_label = gtk_label_new("");
-    gtk_box_pack_start(GTK_BOX(menu_container), placeholder_label, FALSE, FALSE, 0);
-
-    GtkWidget *clock_label = gtk_label_new("");
-    GtkWidget *bat_label = gtk_label_new("");
-    GtkWidget *vol_label = gtk_label_new("");
+    // ĽAVÁ STRANA: Názov aplikácie
+    GtkWidget *left_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+    gtk_widget_set_margin_start(left_box, 15); 
     
-    gtk_box_pack_end(GTK_BOX(main_box), clock_label, FALSE, FALSE, 10); 
-    gtk_box_pack_end(GTK_BOX(main_box), bat_label, FALSE, FALSE, 10); 
-    gtk_box_pack_end(GTK_BOX(main_box), vol_label, FALSE, FALSE, 10); 
+    GtkWidget *title_event_box = gtk_event_box_new();
+    gtk_event_box_set_visible_window(GTK_EVENT_BOX(title_event_box), FALSE);
+    
+    GtkWidget *title_label = gtk_label_new("Plocha");
+    gtk_style_context_add_class(gtk_widget_get_style_context(title_label), "app-title");
 
-    PanelLabels *status_labels = g_new0(PanelLabels, 1);
-    status_labels->clock = clock_label;
-    status_labels->battery = bat_label;
-    status_labels->volume = vol_label;
+    gtk_label_set_max_width_chars(GTK_LABEL(title_label), 30);
+    gtk_label_set_ellipsize(GTK_LABEL(title_label), PANGO_ELLIPSIZE_END);
 
-    update_clock(status_labels);
-    g_timeout_add(1000, update_clock, status_labels);
+    gtk_container_add(GTK_CONTAINER(title_event_box), title_label);
+    gtk_box_pack_start(GTK_BOX(left_box), title_event_box, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(panel_box), left_box, FALSE, FALSE, 0);
 
-    init_menu_system(menu_container, placeholder_label);
-    setup_dbus_menu();
+    // STRED: Spacer
+    GtkWidget *spacer = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    gtk_box_pack_start(GTK_BOX(panel_box), spacer, TRUE, TRUE, 0);
 
-    g_signal_connect(window, "destroy", G_CALLBACK(gtk_main_quit), NULL);
+	// PRAVÁ STRANA: Indikátory
+	GtkWidget *right_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+	gtk_widget_set_margin_end(right_box, 15);
 
-    gtk_widget_show_all(window);
-    gtk_main();
+	GtkWidget *net_label = gtk_label_new("📶 WiFi");
 
-    g_free(status_labels);
-    return 0;
+	// Zabalenie volume_label do EventBoxu pre klikateľnosť
+	GtkWidget *volume_event_box = gtk_event_box_new();
+	gtk_event_box_set_visible_window(GTK_EVENT_BOX(volume_event_box), FALSE);
+	GtkWidget *volume_label = gtk_label_new("🔊 --%");
+	gtk_container_add(GTK_CONTAINER(volume_event_box), volume_label);
+
+	gtk_widget_add_events(volume_event_box, GDK_BUTTON_PRESS_MASK);
+	g_signal_connect(volume_event_box, "button-press-event", G_CALLBACK(on_volume_click), NULL);
+
+	GtkWidget *battery_label = gtk_label_new("🔋 --%");
+	GtkWidget *clock_label = gtk_label_new("--:--");
+
+	// Aplikovanie štýlov (aj na obalový volume_event_box pre zachovanie vzhľadu)
+	gtk_style_context_add_class(gtk_widget_get_style_context(net_label), "indicator-item");
+	gtk_style_context_add_class(gtk_widget_get_style_context(volume_event_box), "indicator-item");
+	gtk_style_context_add_class(gtk_widget_get_style_context(battery_label), "indicator-item");
+	gtk_style_context_add_class(gtk_widget_get_style_context(clock_label), "indicator-item");
+	gtk_style_context_add_class(gtk_widget_get_style_context(clock_label), "clock-item");
+
+	gtk_box_pack_start(GTK_BOX(right_box), net_label, FALSE, FALSE, 0);
+	gtk_box_pack_start(GTK_BOX(right_box), volume_event_box, FALSE, FALSE, 0);
+	gtk_box_pack_start(GTK_BOX(right_box), battery_label, FALSE, FALSE, 0);
+	gtk_box_pack_start(GTK_BOX(right_box), clock_label, FALSE, FALSE, 0);
+
+	// Spustenie tickerov
+	update_clock_ticker(clock_label);
+	g_timeout_add_seconds(1, update_clock_ticker, clock_label);
+	update_volume_ticker(volume_label);
+	g_timeout_add_seconds(1, update_volume_ticker, volume_label);
+	update_battery_ticker(battery_label);
+	g_timeout_add_seconds(5, update_battery_ticker, battery_label);
+	update_network_ticker(net_label);
+	g_timeout_add_seconds(3, update_network_ticker, net_label);
+
+	gtk_box_pack_end(GTK_BOX(panel_box), right_box, FALSE, FALSE, 0);
+
+	// Inicializácia sledovania okien
+	init_menu_system(title_event_box, title_label);
+	setup_dbus_menu();
+
+	refresh_application_title();
+
+	g_signal_connect(window, "destroy", G_CALLBACK(gtk_main_quit), NULL);
+	gtk_widget_show_all(window);
+
+	gtk_main();
+	return 0;
 }
-
